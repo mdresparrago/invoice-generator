@@ -322,28 +322,94 @@ export default defineComponent({
 
     const formattedDate = computed(() => form.date)
 
-    const downloadImage = async () => {
-      try {
-        // Uses html2canvas if available in the host project.
-        // npm install html2canvas
-        const html2canvas = (await import('html2canvas')).default
-        const canvas = await html2canvas(receiptOuter.value, {
-          useCORS: true,
-          scale: 2,
-          backgroundColor: null
-        })
-        const link = document.createElement('a')
-        link.download = `invoice-${form.invoiceNumber || 'receipt'}.png`
-        link.href = canvas.toDataURL('image/png')
-        link.click()
-      } catch (e) {
-        console.log(e)
-        Notify.create({
-          type: 'negative',
-          message: 'Install html2canvas to enable image download: npm install html2canvas'
-        })
+const downloadImage = async () => {
+  try {
+    const html2canvas = (await import('html2canvas')).default
+
+    // const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+
+    const canvas = await html2canvas(receiptOuter.value, {
+      useCORS: true,
+      backgroundColor: null,
+      scale: 3,
+      // FIX FOR MOBILE DARKENING:
+      imageTimeout: 0,
+      logging: false,
+      onclone: (clonedDoc) => {
+        // Find the receipt card inside the screenshot factory
+        const clonedCard = clonedDoc.querySelector('.receipt-card')
+        if (clonedCard) {
+          // Remove the shadow completely so mobile doesn't bleed it across the paper texture
+          clonedCard.style.boxShadow = 'none'
+          clonedCard.style.webkitBoxShadow = 'none'
+        }
       }
+    })
+
+    let blob = await new Promise(resolve =>
+      canvas.toBlob(resolve, 'image/png')
+    )
+
+    // Safari fallback
+    if (!blob) {
+      const dataUrl = canvas.toDataURL('image/png')
+
+      const a = document.createElement('a')
+      a.href = dataUrl
+      a.download = `invoice-${form.invoiceNumber || 'receipt'}.png`
+      a.click()
+
+      return
     }
+
+    const fileName = `invoice-${form.invoiceNumber || 'receipt'}.png`
+    const file = new File([blob], fileName, {
+      type: 'image/png'
+    })
+
+    // iPhone / Android Share Sheet
+    const isMobile =
+  /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+
+if (
+  isMobile &&
+  navigator.share &&
+  navigator.canShare &&
+  navigator.canShare({ files: [file] })
+) {
+  try {
+    await navigator.share({
+      files: [file],
+      title: fileName
+    })
+    return
+  } catch (err) {
+    if (err.name === 'AbortError') return
+  }
+    }
+
+    // Desktop download
+    const url = URL.createObjectURL(blob)
+
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fileName
+
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+
+  } catch (err) {
+    console.error(err)
+
+    Notify.create({
+      type: 'negative',
+      message: 'Unable to generate receipt image.'
+    })
+  }
+}
 
     return {
       receiptOuter,
