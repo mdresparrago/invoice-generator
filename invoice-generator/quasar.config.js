@@ -44,7 +44,7 @@ export default defineConfig((ctx) => {
       // vueRouterBase,
       // vueDevtools,
 
-      publicPath: '/',
+      publicPath: '/invoice-generator/',
       // define: {},
       // defineEnv: {}
       // ignorePublicFolder: true,

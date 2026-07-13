@@ -6,17 +6,47 @@
         <q-card flat bordered class="form-card q-ma-md">
           <q-card-section>
             <div class="form-header">
-
-                <div>
-                  <div class="text-h5 text-weight-bold">
-                    Invoice Generator
-                  </div>
-
-                  <div class="text-grey-7 q-pb-md">
-                    Complete the information and preview updates instantly.
-                  </div>
+              <div>
+                <div class="text-h5 text-weight-bold">
+                  Invoice Generator
+                </div>
+                <div class="text-grey-7 q-pb-md">
+                  Complete the information and preview updates instantly.
                 </div>
               </div>
+            </div>
+
+            <!-- BULK UPLOAD -->
+            <div class="row items-center justify-between q-mb-sm bulk-upload-row">
+              <q-btn
+                flat dense color="primary" icon="upload_file" label="Bulk upload"
+                no-caps :disable="isBatchProcessing"
+                @click="triggerBulkUpload"
+              />
+              <q-btn
+                flat dense color="grey-7" icon="download" label="Download template"
+                no-caps @click="downloadTemplate"
+              />
+            </div>
+            <input
+              ref="fileInput"
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              style="display: none"
+              @change="handleBulkFile"
+            />
+
+            <q-linear-progress
+              v-if="isBatchProcessing"
+              :value="batchProgress.total ? batchProgress.current / batchProgress.total : 0"
+              color="primary"
+              class="q-mb-xs"
+            />
+            <div v-if="isBatchProcessing" class="text-caption text-grey-7 q-mb-sm">
+              Generating receipt {{ batchProgress.current }} of {{ batchProgress.total }}...
+            </div>
+
+            <q-separator class="q-my-md" />
 
             <q-input
               v-model="form.businessName"
@@ -38,7 +68,6 @@
                   v-model="form.date"
                   label="Date"
                   dense outlined class="q-mb-sm"
-                  mask="##/##/####"
                   placeholder="MM/DD/YYYY"
                 >
                   <template #append>
@@ -109,7 +138,7 @@
                 </div>
                 <div class="col-1 flex flex-center">
                   <q-btn
-                    flat dense  icon="close" size="sm" color="negative"
+                    flat dense icon="close" size="sm" color="negative"
                     :disable="form.items.length === 1"
                     @click="removeItem(idx)"
                   />
@@ -170,13 +199,12 @@
             />
           </q-card-section>
         </q-card>
-          <div class="preview-actions q-ma-sm flex justify-end">
-            <q-btn
-              color="primary" rounded icon="download" label="Download as Image"
-              @click="downloadImage" no-caps unelevated
-            />
-          </div>
-
+        <div class="preview-actions q-ma-sm flex justify-end">
+          <q-btn
+            color="primary" rounded icon="download" label="Download as Image"
+            @click="downloadImage" no-caps unelevated
+          />
+        </div>
       </div>
 
       <!-- RIGHT: RECEIPT PREVIEW -->
@@ -198,7 +226,11 @@
               <div class="dashed-line" />
 
               <div class="datetime-row">
-                {{ formattedDate }} ({{ (form.day || '').toUpperCase() }})&nbsp;&nbsp;{{ form.time }}
+                {{ formattedDate }}
+                <span v-if="form.day && !formattedDate.toUpperCase().includes(form.day.toUpperCase())">
+                  ({{ form.day.toUpperCase() }})
+                </span>
+                <span v-if="form.time">&nbsp;&nbsp;{{ form.time }}</span>
               </div>
 
               <div class="dashed-line" />
@@ -228,9 +260,11 @@
                 <div>MODE OF PAYMENT:</div>
                 <div class="mono-bold">{{ (form.paymentMode || '').toUpperCase() }}</div>
               </div>
-              <div class="kv-row">
+              <div class="kv-row text-right-block">
                 <div>PAYMENT CUT OFF:</div>
-                <div class="mono-bold">{{ form.paymentCutoffDate }} {{ form.paymentCutoffTime }}</div>
+                <div class="mono-bold">
+                  {{ form.paymentCutoffDate }}<span v-if="form.paymentCutoffDate && form.paymentCutoffTime">&nbsp;</span>{{ form.paymentCutoffTime }}
+                </div>
               </div>
 
               <div class="dashed-line" />
@@ -245,7 +279,7 @@
               </div>
               <div class="kv-row">
                 <div>COURIER:</div>
-                <div class="mono-bold">{{ form.courier }}</div>
+                <div class="mono-bold">{{ (form.courier || '').toUpperCase() }}</div>
               </div>
 
               <div class="footer-note">
@@ -255,7 +289,7 @@
           </div>
         </div>
         <div class="q-pa-md q-ma-md flex justify-center text-grey-5">
-        Tally by dani
+          Tally by dani
         </div>
       </div>
     </div>
@@ -263,21 +297,27 @@
 </template>
 
 <script>
-import { defineComponent, reactive, computed, ref } from 'vue'
+import { defineComponent, reactive, computed, ref, nextTick } from 'vue'
 import { date as qDate, Notify } from 'quasar'
+import * as XLSX from 'xlsx'
+import JSZip from 'jszip'
 
 export default defineComponent({
   name: 'InvoiceGenerator',
 
   setup () {
     const receiptOuter = ref(null)
+    const fileInput = ref(null)
+
+    const isBatchProcessing = ref(false)
+    const batchProgress = reactive({ current: 0, total: 0 })
 
     const today = new Date()
     const dayOptions = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']
     const paymentOptions = ['GCASH', 'BANK TRANSFER', 'CASH ON DELIVERY', 'MAYA']
 
     let idCounter = 1
-    const makeItem = () => ({ id: idCounter++, name: '', qty: 1, price: 0 })
+    const makeItem = () => ({ id: idCounter++, name: '', qty: '', price: '' })
 
     const form = reactive({
       businessName: 'KAELA COLLECTIVE',
@@ -287,10 +327,10 @@ export default defineComponent({
       time: qDate.formatDate(today, 'HH:mm:ss'),
       day: dayOptions[today.getDay()],
       items: [makeItem(), makeItem()],
-      shippingFee: 65,
-      paymentMode: 'GCASH',
+      shippingFee: '',
+      paymentMode: '',
       paymentCutoffDate: '',
-      paymentCutoffTime: '12:00 NN',
+      paymentCutoffTime: '',
       packingDate: '',
       shippingDate: '',
       courier: '',
@@ -302,7 +342,6 @@ export default defineComponent({
     })
 
     const onDatePicked = (val) => {
-      // val comes back as MM/DD/YYYY because of the mask prop above
       form.date = val
     }
 
@@ -322,97 +361,272 @@ export default defineComponent({
 
     const formattedDate = computed(() => form.date)
 
-const downloadImage = async () => {
-  try {
-    const html2canvas = (await import('html2canvas')).default
+    const renderReceiptBlob = async () => {
+      const html2canvas = (await import('html2canvas')).default
 
-    // const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
-
-    const canvas = await html2canvas(receiptOuter.value, {
-      useCORS: true,
-      backgroundColor: null,
-      scale: 3,
-      // FIX FOR MOBILE DARKENING:
-      imageTimeout: 0,
-      logging: false,
-      onclone: (clonedDoc) => {
-        // Find the receipt card inside the screenshot factory
-        const clonedCard = clonedDoc.querySelector('.receipt-card')
-        if (clonedCard) {
-          // Remove the shadow completely so mobile doesn't bleed it across the paper texture
-          clonedCard.style.boxShadow = 'none'
-          clonedCard.style.webkitBoxShadow = 'none'
+      const canvas = await html2canvas(receiptOuter.value, {
+        useCORS: true,
+        backgroundColor: null,
+        scale: 3,
+        imageTimeout: 0,
+        logging: false,
+        onclone: (clonedDoc) => {
+          const clonedCard = clonedDoc.querySelector('.receipt-card')
+          if (clonedCard) {
+            clonedCard.style.boxShadow = 'none'
+            clonedCard.style.webkitBoxShadow = 'none'
+          }
         }
+      })
+
+      return await new Promise(resolve => canvas.toBlob(resolve, 'image/png'))
+    }
+
+    const downloadImage = async () => {
+      try {
+        const blob = await renderReceiptBlob()
+
+        if (!blob) {
+          const html2canvas = (await import('html2canvas')).default
+          const canvas = await html2canvas(receiptOuter.value, { useCORS: true, backgroundColor: null, scale: 3 })
+          const dataUrl = canvas.toDataURL('image/png')
+
+          const a = document.createElement('a')
+          a.href = dataUrl
+          a.download = `invoice-${form.invoiceNumber || 'receipt'}.png`
+          a.click()
+          return
+        }
+
+        const fileName = `invoice-${form.invoiceNumber || 'receipt'}.png`
+        const file = new File([blob], fileName, { type: 'image/png' })
+        const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+
+        if (
+          isMobile &&
+          navigator.share &&
+          navigator.canShare &&
+          navigator.canShare({ files: [file] })
+        ) {
+          try {
+            await navigator.share({ files: [file], title: fileName })
+            return
+          } catch (err) {
+            if (err.name === 'AbortError') return
+          }
+        }
+
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = fileName
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        setTimeout(() => URL.revokeObjectURL(url), 1000)
+      } catch (err) {
+        console.error(err)
+        Notify.create({ type: 'negative', message: 'Unable to generate receipt image.' })
       }
-    })
-
-    let blob = await new Promise(resolve =>
-      canvas.toBlob(resolve, 'image/png')
-    )
-
-    // Safari fallback
-    if (!blob) {
-      const dataUrl = canvas.toDataURL('image/png')
-
-      const a = document.createElement('a')
-      a.href = dataUrl
-      a.download = `invoice-${form.invoiceNumber || 'receipt'}.png`
-      a.click()
-
-      return
     }
 
-    const fileName = `invoice-${form.invoiceNumber || 'receipt'}.png`
-    const file = new File([blob], fileName, {
-      type: 'image/png'
-    })
-
-    // iPhone / Android Share Sheet
-    const isMobile =
-  /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
-
-if (
-  isMobile &&
-  navigator.share &&
-  navigator.canShare &&
-  navigator.canShare({ files: [file] })
-) {
-  try {
-    await navigator.share({
-      files: [file],
-      title: fileName
-    })
-    return
-  } catch (err) {
-    if (err.name === 'AbortError') return
-  }
+    const triggerBulkUpload = () => {
+      fileInput.value?.click()
     }
 
-    // Desktop download
-    const url = URL.createObjectURL(blob)
+    const processBatch = async (rows) => {
+      isBatchProcessing.value = true
+      batchProgress.current = 0
+      batchProgress.total = rows.length
 
-    const a = document.createElement('a')
-    a.href = url
-    a.download = fileName
+      const zip = new JSZip()
 
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
+      try {
+        for (let i = 0; i < rows.length; i++) {
+          applyRowToForm(rows[i])
 
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
+          await nextTick()
+          await new Promise(resolve => setTimeout(resolve, 60))
 
-  } catch (err) {
-    console.error(err)
+          const blob = await renderReceiptBlob()
+          if (blob) {
+            const fileName = `invoice-${form.invoiceNumber || (i + 1)}.png`
+            zip.file(fileName, blob)
+          }
 
-    Notify.create({
-      type: 'negative',
-      message: 'Unable to generate receipt image.'
-    })
-  }
-}
+          batchProgress.current = i + 1
+        }
+
+        const zipBlob = await zip.generateAsync({ type: 'blob' })
+        const url = URL.createObjectURL(zipBlob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `receipts-batch-${Date.now()}.zip`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        setTimeout(() => URL.revokeObjectURL(url), 1000)
+
+        Notify.create({ type: 'positive', message: `Generated ${rows.length} receipts.` })
+      } catch (err) {
+        console.error(err)
+        Notify.create({ type: 'negative', message: 'Batch generation failed partway through.' })
+      } finally {
+        isBatchProcessing.value = false
+      }
+    }
+
+    const handleBulkFile = async (event) => {
+      const file = event.target.files[0]
+      event.target.value = ''
+      if (!file) return
+
+      try {
+        const data = await new Promise((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = (e) => {
+            try {
+              const arr = new Uint8Array(e.target.result)
+              const workbook = XLSX.read(arr, { type: 'array' })
+              const sheet = workbook.Sheets[workbook.SheetNames[0]]
+              const json = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false })
+              resolve(json)
+            } catch (err) { reject(err) }
+          }
+          reader.onerror = reject
+          reader.readAsArrayBuffer(file)
+        })
+
+        if (!data.length) {
+          Notify.create({ type: 'warning', message: 'No orders found in that file.' })
+          return
+        }
+
+        const groupedOrders = []
+        const map = new Map()
+
+        data.forEach(row => {
+          const invNum = row.invoiceNumber !== undefined ? String(row.invoiceNumber).trim() : ''
+
+          if (!map.has(invNum)) {
+            const baseOrder = {
+              ...row,
+              invoiceNumber: invNum,
+              items: []
+            }
+
+            if (row.name && String(row.name).trim()) {
+              baseOrder.items.push({
+                id: idCounter++,
+                name: String(row.name).trim(),
+                qty: Number(row.qty) || 1,
+                price: Number(row.price) || 0
+              })
+            }
+
+            map.set(invNum, baseOrder)
+            groupedOrders.push(baseOrder)
+          } else {
+            const existingOrder = map.get(invNum)
+
+            if (row.date) existingOrder.date = row.date
+            if (row.time) existingOrder.time = row.time
+            if (row.day) existingOrder.day = row.day
+            if (row.shippingFee !== undefined && row.shippingFee !== '') existingOrder.shippingFee = row.shippingFee
+            if (row.paymentMode) existingOrder.paymentMode = row.paymentMode
+
+            // Unnamed/Shifted column fallbacks
+            const rawCutoffDate = row.paymentCutoffDate || row.__EMPTY_1 || row.paymentCut
+            if (rawCutoffDate) existingOrder.paymentCutoffDate = rawCutoffDate
+
+            const rawCutoffTime = row.paymentCutoffTime || row.paymentCu
+            if (rawCutoffTime) existingOrder.paymentCutoffTime = rawCutoffTime
+
+            if (row.packingDate) existingOrder.packingDate = row.packingDate
+            if (row.shippingDate) existingOrder.shippingDate = row.shippingDate
+            if (row.courier) existingOrder.courier = row.courier
+
+            if (row.name && String(row.name).trim()) {
+              existingOrder.items.push({
+                id: idCounter++,
+                name: String(row.name).trim(),
+                qty: Number(row.qty) || 1,
+                price: Number(row.price) || 0
+              })
+            }
+          }
+        })
+
+        await processBatch(groupedOrders)
+      } catch (err) {
+        console.error(err)
+        Notify.create({ type: 'negative', message: 'Could not read that file.' })
+      }
+    }
+
+    const applyRowToForm = (order) => {
+      const formatDateValue = (val) => {
+        if (!val) return ''
+        return String(val).trim()
+      }
+
+      if (order.businessName) form.businessName = String(order.businessName)
+      form.invoiceNumber = order.invoiceNumber
+
+      form.date = formatDateValue(order.date)
+      form.time = order.time ? String(order.time) : ''
+      form.day = order.day ? String(order.day).toUpperCase() : ''
+
+      form.items = order.items.length ? order.items : [makeItem()]
+      form.shippingFee = (order.shippingFee !== undefined && order.shippingFee !== '') ? Number(order.shippingFee) : 0
+      form.paymentMode = order.paymentMode ? String(order.paymentMode).toUpperCase() : ''
+
+      const rawCutoff = order.paymentCutoffDate || order.__EMPTY_1 || order.paymentCut
+      form.paymentCutoffDate = formatDateValue(rawCutoff)
+
+      const rawCutoffTime = order.paymentCutoffTime || order.paymentCu
+      form.paymentCutoffTime = rawCutoffTime ? String(rawCutoffTime) : ''
+
+      form.packingDate = formatDateValue(order.packingDate)
+      form.shippingDate = formatDateValue(order.shippingDate)
+      form.courier = order.courier ? String(order.courier) : ''
+    }
+
+    const downloadTemplate = () => {
+      const headers = [
+        'invoiceNumber', 'date', 'time', 'day',
+        'name', 'qty', 'price',
+        'shippingFee', 'paymentMode', 'paymentCutoffDate', 'paymentCutoffTime',
+        'packingDate', 'shippingDate', 'courier'
+      ]
+      const sample = [{
+        invoiceNumber: 'KC-260627-001',
+        date: qDate.formatDate(today, 'MM/DD/YYYY'),
+        time: '15:30:00',
+        day: dayOptions[today.getDay()],
+        name: 'Backless ruffle hem halter dress',
+        qty: 1,
+        price: 299,
+        shippingFee: 65,
+        paymentMode: 'MAYA',
+        paymentCutoffDate: '07/20/2026',
+        paymentCutoffTime: '23:59',
+        packingDate: '07/26/2026',
+        shippingDate: '07/26/2026',
+        courier: 'ANGKAS'
+      }]
+
+      const ws = XLSX.utils.json_to_sheet(sample, { header: headers })
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Orders')
+      XLSX.writeFile(wb, 'receipt-order-template.xlsx')
+    }
 
     return {
       receiptOuter,
+      fileInput,
+      isBatchProcessing,
+      batchProgress,
       form,
       dayOptions,
       paymentOptions,
@@ -422,7 +636,10 @@ if (
       formatNum,
       formattedDate,
       onDatePicked,
-      downloadImage
+      downloadImage,
+      triggerBulkUpload,
+      handleBulkFile,
+      downloadTemplate
     }
   }
 })
@@ -445,6 +662,10 @@ if (
     margin-bottom: 12px;
   }
 
+  .bulk-upload-row {
+    flex-wrap: wrap;
+  }
+
   .preview-wrap {
     position: sticky;
     top: 16px;
@@ -453,26 +674,24 @@ if (
     width: 100%;
   }
 
-  // Outer maroon background frame
   .receipt-outer {
     background-image: url('../assets/maroon-bg.jpg');
     width: 100%;
     max-width: 450px;
     background-position: center;
     border-radius: 10px;
-    padding: 24px; // Slightly reduced padding so it scales nicely on smaller viewports
+    padding: 24px;
     box-sizing: border-box;
     display: flex;
     justify-content: center;
   }
 
-  // Cream receipt card
   .receipt-card {
     background-image: url('../assets/paper-bg.jpg');
     background-size: cover;
     background-position: center;
-    width: 100%; // Changed from fit-content to 100% so it stays stable
-    max-width: 450px; // OPTIONAL: Keeps the receipt from looking ridiculously wide on massive desktop screens
+    width: 100%;
+    max-width: 450px;
     padding: 28px;
     color: #3a1030;
     font-family: 'IBM Plex Mono', monospace;
@@ -481,7 +700,6 @@ if (
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
     box-sizing: border-box;
 
-    // jagged torn-paper edges top & bottom
     clip-path: polygon(
       0% 1%, 3% 0%, 6% 1.2%, 9% 0%, 12% 1.2%, 15% 0%, 18% 1.2%, 21% 0%,
       24% 1.2%, 27% 0%, 30% 1.2%, 33% 0%, 36% 1.2%, 39% 0%, 42% 1.2%, 45% 0%,
@@ -495,6 +713,7 @@ if (
       16% 98.8%, 13% 100%, 10% 98.8%, 7% 100%, 4% 98.8%, 0% 100%
     );
   }
+
   .mono-bold {
     font-weight: 700;
   }
@@ -527,6 +746,8 @@ if (
   .datetime-row {
     text-align: center;
     font-weight: 500;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
   .items-block {
@@ -559,8 +780,17 @@ if (
   .kv-row {
     display: flex;
     justify-content: space-between;
+    align-items: flex-start;
     gap: 12px;
     margin-bottom: 4px;
+
+    &.text-right-block {
+      .mono-bold {
+        text-align: right;
+        max-width: 60%;
+        word-break: break-word;
+      }
+    }
   }
 
   .footer-note {
